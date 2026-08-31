@@ -138,7 +138,7 @@ Do not pad the post with empty phrases such as:
 * “The sky is the limit...”
 * “As we all know...”
 * “I am incredibly excited to announce...”
-
+ use em dashes sparingly
 unless the wording is genuinely appropriate to the provided context.
 
 The post should feel specific to the actual situation.
@@ -221,3 +221,108 @@ def generate_post(context, history):
     # Print which underlying model processed your request
     print(f"\n[Served by: {response.model}]")
     return post
+
+
+def upload_image_to_linkedin(image_file, user):
+    """
+    Uploads an in-memory image to LinkedIn and returns the image URN.
+
+    3-step LinkedIn flow:
+      1. POST /rest/images?action=initializeUpload -> { value: { uploadUrl, image } }
+      2. PUT uploadUrl with binary
+      3. Caller attaches URN to /rest/posts payload
+
+    Args:
+        image_file: Django UploadedFile (InMemoryUploadedFile / TemporaryUploadedFile)
+        user: Auth user with access_token and linkedin_sub
+    Returns:
+        str: image URN e.g. urn:li:image:C4E10AQ...
+    Raises:
+        Exception with descriptive message on failure
+    """
+    from django.utils import timezone
+    version = os.getenv("LINKEDIN_API_VERSION", timezone.now().strftime("%Y%m"))
+    if not version:
+        version = "202401"
+    author_urn = f"urn:li:person:{user.linkedin_sub}"
+    headers = {
+        "Authorization": f"Bearer {user.access_token}",
+        "LinkedIn-Version": version,
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1: Initialize the upload request
+    init_url = "https://api.linkedin.com/rest/images?action=initializeUpload"
+    init_payload = {
+        "initializeUploadRequest": {
+            "owner": author_urn
+        }
+    }
+
+    try:
+        init_res = requests.post(init_url, json=init_payload, headers=headers, timeout=15)
+    except requests.RequestException as e:
+        raise Exception(f"Failed to reach LinkedIn initializeUpload: {str(e)}")
+
+    if init_res.status_code != 200:
+        # try to surface JSON error if available
+        try:
+            detail = init_res.json()
+        except Exception:
+            detail = init_res.text
+        raise Exception(f"Failed to initialize image upload ({init_res.status_code}): {detail}")
+
+    init_data = init_res.json().get("value", {})
+    upload_url = init_data.get("uploadUrl")
+    image_urn = init_data.get("image")  # e.g. urn:li:image:C4E10AQ...
+
+    if not upload_url or not image_urn:
+        raise Exception(f"LinkedIn init response missing uploadUrl/image: {init_data}")
+
+    # Step 2: Upload image binary to the designated uploadUrl
+    # Validate file
+    ALLOWED_TYPES = {"image/jpeg", "image/png", "image/jpg", "image/webp", "image/gif"}
+    content_type = getattr(image_file, "content_type", "image/jpeg") or "image/jpeg"
+    if content_type not in ALLOWED_TYPES:
+        # fallback: let LinkedIn reject if unsupported, but warn
+        pass
+
+    # File size guard: LinkedIn allows up to ~ 5MB per image for posts; enforce 10MB max
+    if hasattr(image_file, "size") and image_file.size > 10 * 1024 * 1024:
+        raise Exception(f"Image too large ({image_file.size} bytes). Max 10MB.")
+
+    # Ensure file pointer at start
+    try:
+        image_file.seek(0)
+    except Exception:
+        pass
+
+    binary = image_file.read()
+
+    upload_headers = {
+        "Authorization": f"Bearer {user.access_token}",
+        "Content-Type": content_type,
+    }
+
+    try:
+        upload_res = requests.put(upload_url, data=binary, headers=upload_headers, timeout=30)
+    except requests.RequestException as e:
+        raise Exception(f"Failed to upload binary to LinkedIn: {str(e)}")
+
+    if upload_res.status_code not in [200, 201]:
+        raise Exception(f"Failed to upload image binary ({upload_res.status_code}): {upload_res.text}")
+
+    return image_urn
+
+
+def upload_images_to_linkedin(image_files, user):
+    """
+    Upload multiple images sequentially. Returns list of image URNs.
+    Stops on first failure and raises.
+    """
+    urns = []
+    for f in image_files:
+        urn = upload_image_to_linkedin(f, user)
+        urns.append(urn)
+    return urns

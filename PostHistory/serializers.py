@@ -5,10 +5,11 @@ class PostHistorySerializer(serializers.ModelSerializer):
     user = serializers.PrimaryKeyRelatedField(read_only=True, default=serializers.CurrentUserDefault())
     class Meta:
         model = PostHistory
-        fields = ['id', 'user', 'context', 'post', 'created_at']
+        fields = ['id', 'user', 'context', 'post', 'image_urns', 'created_at']
         extra_kwargs = {
             'user': {'read_only': True},
             'post': {'read_only': True},
+            'image_urns': {'read_only': True},
         }
     def validate(self, attrs):
         if not attrs.get('context'):
