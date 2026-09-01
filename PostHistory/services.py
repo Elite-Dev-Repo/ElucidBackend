@@ -2,6 +2,7 @@
 import requests
 import os
 from openai import OpenAI
+from datetime import datetime
 
 SECURE_PROMPT="""You are a **LinkedIn post generator and writer**.
 
@@ -138,7 +139,10 @@ Do not pad the post with empty phrases such as:
 * “The sky is the limit...”
 * “As we all know...”
 * “I am incredibly excited to announce...”
- use em dashes sparingly
+
+use em dashes sparingly
+do not use text formatting like bold or italics
+do not assume my tech stack, if i do not say it do not say anything about it
 unless the wording is genuinely appropriate to the provided context.
 
 The post should feel specific to the actual situation.
@@ -196,130 +200,152 @@ The final response must be:
 The user will provide the context for the LinkedIn post after this instruction.
 """
 
+def _get_active_linkedin_version_candidates():
+    """Yield candidate LinkedIn-Version headers dynamically, newest first."""
+    EXPIRED = {"202401", "20240101", "202212", "202301", "202302", "202303", "202304"}
+    env_ver = os.getenv("LINKEDIN_API_VERSION") or os.getenv("LINKEDIN_VERSION")
+
+    now = datetime.now()
+    seen = set()
+
+    # Generate current month and past 6 months dynamically
+    for i in range(7):
+        year = now.year
+        month = now.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        v = f"{year}{month:02d}"
+        if v not in EXPIRED and v not in seen:
+            seen.add(v)
+            yield v
+
+    if env_ver and env_ver not in EXPIRED and env_ver not in seen:
+        seen.add(env_ver)
+        yield env_ver
+
+
 def generate_post(context, history):
+    """
+    Generates a long-form LinkedIn post using OpenRouter AI.
+    Uses separate system and user messages to prevent prompt injection.
+    """
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY", ""),
     )
 
-    response = client.chat.completions.create(
-        model="openrouter/free",
-        messages=[
-            {"role": "user", "content":f"{SECURE_PROMPT} context-{context}, posts_history-{history}"}
-        ],
-        # Optional metadata headers for OpenRouter app attribution
-        extra_headers={
-            "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", ""),
-            "X-Title": "Elucid"
-        }
-    )
+    user_content = f"Context:\n{context}\n\nPost History Context:\n{history}"
 
-    # Print the response content
-    post = response.choices[0].message.content
-    print(post)
+    try:
+        response = client.chat.completions.create(
+            model="openrouter/free",
+            messages=[
+                {"role": "system", "content": SECURE_PROMPT},
+                {"role": "user", "content": user_content}
+            ],
+            extra_headers={
+                "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", ""),
+                "X-Title": "Elucid"
+            },
+            timeout=45.0
+        )
+        post = response.choices[0].message.content
+        print(f"\n[Served by: {response.model}]")
+        return post
 
-    # Print which underlying model processed your request
-    print(f"\n[Served by: {response.model}]")
-    return post
+    except OpenAIError as e:
+        print(f"[Generate Post Error] OpenAI API call failed: {str(e)}")
+        raise Exception(f"AI post generation failed: {str(e)}")
 
 
 def upload_image_to_linkedin(image_file, user):
     """
-    Uploads an in-memory image to LinkedIn and returns the image URN.
-
-    3-step LinkedIn flow:
-      1. POST /rest/images?action=initializeUpload -> { value: { uploadUrl, image } }
-      2. PUT uploadUrl with binary
-      3. Caller attaches URN to /rest/posts payload
-
-    Args:
-        image_file: Django UploadedFile (InMemoryUploadedFile / TemporaryUploadedFile)
-        user: Auth user with access_token and linkedin_sub
-    Returns:
-        str: image URN e.g. urn:li:image:C4E10AQ...
-    Raises:
-        Exception with descriptive message on failure
+    Uploads an image file to LinkedIn using 3-step initialization and binary PUT.
+    Handles network resets, file seek rewinds, and version fallback logic.
     """
-    from django.utils import timezone
-    version = os.getenv("LINKEDIN_API_VERSION", timezone.now().strftime("%Y%m"))
-    if not version:
-        version = "202401"
     author_urn = f"urn:li:person:{user.linkedin_sub}"
-    headers = {
-        "Authorization": f"Bearer {user.access_token}",
-        "LinkedIn-Version": version,
-        "X-Restli-Protocol-Version": "2.0.0",
-        "Content-Type": "application/json",
-    }
+    
+    upload_url = None
+    image_urn = None
+    last_init_error = None
 
-    # Step 1: Initialize the upload request
-    init_url = "https://api.linkedin.com/rest/images?action=initializeUpload"
-    init_payload = {
-        "initializeUploadRequest": {
-            "owner": author_urn
+    # Step 1: Negotiate API Version & Initialize Upload Request
+    for ver in _get_active_linkedin_version_candidates():
+        headers = {
+            "Authorization": f"Bearer {user.access_token}",
+            "LinkedIn-Version": ver,
+            "X-Restli-Protocol-Version": "2.0.0",
+            "Content-Type": "application/json",
         }
-    }
 
-    try:
-        init_res = requests.post(init_url, json=init_payload, headers=headers, timeout=15)
-    except requests.RequestException as e:
-        raise Exception(f"Failed to reach LinkedIn initializeUpload: {str(e)}")
+        init_url = "https://api.linkedin.com/rest/images?action=initializeUpload"
+        init_payload = {
+            "initializeUploadRequest": {
+                "owner": author_urn
+            }
+        }
 
-    if init_res.status_code != 200:
-        # try to surface JSON error if available
         try:
-            detail = init_res.json()
-        except Exception:
-            detail = init_res.text
-        raise Exception(f"Failed to initialize image upload ({init_res.status_code}): {detail}")
-
-    init_data = init_res.json().get("value", {})
-    upload_url = init_data.get("uploadUrl")
-    image_urn = init_data.get("image")  # e.g. urn:li:image:C4E10AQ...
+            init_res = requests.post(init_url, json=init_payload, headers=headers, timeout=15)
+            if init_res.status_code == 200:
+                init_data = init_res.json().get("value", {})
+                upload_url = init_data.get("uploadUrl")
+                image_urn = init_data.get("image")
+                print(f"[LinkedIn Upload] Successfully initialized upload with version {ver}")
+                break
+            elif init_res.status_code == 426 or "NONEXISTENT_VERSION" in init_res.text:
+                continue
+            else:
+                last_init_error = f"Status {init_res.status_code}: {init_res.text}"
+        except requests.RequestException as e:
+            last_init_error = str(e)
 
     if not upload_url or not image_urn:
-        raise Exception(f"LinkedIn init response missing uploadUrl/image: {init_data}")
+        raise Exception(f"Failed to initialize image upload on LinkedIn: {last_init_error or 'No active version'}")
 
-    # Step 2: Upload image binary to the designated uploadUrl
-    # Validate file
-    ALLOWED_TYPES = {"image/jpeg", "image/png", "image/jpg", "image/webp", "image/gif"}
-    content_type = getattr(image_file, "content_type", "image/jpeg") or "image/jpeg"
-    if content_type not in ALLOWED_TYPES:
-        # fallback: let LinkedIn reject if unsupported, but warn
-        pass
-
-    # File size guard: LinkedIn allows up to ~ 5MB per image for posts; enforce 10MB max
-    if hasattr(image_file, "size") and image_file.size > 10 * 1024 * 1024:
-        raise Exception(f"Image too large ({image_file.size} bytes). Max 10MB.")
-
-    # Ensure file pointer at start
-    try:
-        image_file.seek(0)
-    except Exception:
-        pass
-
-    binary = image_file.read()
-
+    # Step 2: Upload Binary Data to presigned upload_url
+    # NOTE: Omit Authorization header on presigned storage URL to prevent 400/403 errors
+    content_type = getattr(image_file, "content_type", "image/png") or "image/png"
     upload_headers = {
-        "Authorization": f"Bearer {user.access_token}",
         "Content-Type": content_type,
     }
 
-    try:
-        upload_res = requests.put(upload_url, data=binary, headers=upload_headers, timeout=30)
-    except requests.RequestException as e:
-        raise Exception(f"Failed to upload binary to LinkedIn: {str(e)}")
+    max_retries = 3
+    last_put_error = None
 
-    if upload_res.status_code not in [200, 201]:
-        raise Exception(f"Failed to upload image binary ({upload_res.status_code}): {upload_res.text}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            if hasattr(image_file, "seek"):
+                image_file.seek(0)
 
-    return image_urn
+            binary_data = image_file.read()
+
+            print(f"[LinkedIn Upload] PUT attempt {attempt}/{max_retries} (size={len(binary_data)} bytes)")
+            
+            upload_res = requests.put(
+                upload_url,
+                data=binary_data,
+                headers=upload_headers,
+                timeout=30
+            )
+
+            if upload_res.status_code in [200, 201]:
+                print(f"[LinkedIn Upload] PUT succeeded on attempt {attempt}")
+                return image_urn
+            else:
+                last_put_error = f"Status {upload_res.status_code}: {upload_res.text}"
+
+        except (requests.RequestException, ConnectionResetError) as e:
+            last_put_error = f"Network socket dropped on attempt {attempt}: {str(e)}"
+            print(f"[LinkedIn Upload] Warning: {last_put_error}")
+
+    raise Exception(f"Failed to upload image binary to LinkedIn after {max_retries} attempts. Details: {last_put_error}")
 
 
 def upload_images_to_linkedin(image_files, user):
     """
-    Upload multiple images sequentially. Returns list of image URNs.
-    Stops on first failure and raises.
+    Uploads multiple image files sequentially and returns their URNs.
     """
     urns = []
     for f in image_files:
