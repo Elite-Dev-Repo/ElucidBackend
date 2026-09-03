@@ -32,7 +32,7 @@ SECRET_KEY = 'django-insecure-3+z(s0f7hl_t^e9gx1#!6y#lc8k9j&p@lb_58-2r)%*d!vd4=v
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'False')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['elucidbackend.onrender.com', 'localhost', 'onrender.com']
 
 
 # Application definition
@@ -185,3 +185,8 @@ SIMPLE_JWT = {
 }
 
 AUTH_USER_MODEL = 'Auth.User'
+
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = [
+    "https://elucid-ai.vercel.app",
+]
