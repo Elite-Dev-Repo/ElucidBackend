@@ -1,8 +1,10 @@
 
 import requests
-import os
+import os, smtplib
 from openai import OpenAI
 from datetime import datetime
+from django.core.mail import send_mail
+from email.message import EmailMessage
 
 SECURE_PROMPT="""You are a **LinkedIn post generator and writer**.
 
@@ -352,3 +354,27 @@ def upload_images_to_linkedin(image_files, user):
         urn = upload_image_to_linkedin(f, user)
         urns.append(urn)
     return urns
+
+
+
+
+def send_email(user, post):
+    PORT = os.getenv("EMAIL_PORT")
+    HOST = os.getenv("EMAIL_HOST")
+    USERNAME = os.getenv("EMAIL_HOST_USER")
+    PASSWORD = os.getenv("EMAIL_PASSWORD")
+         
+    mail = EmailMessage()
+    user_email = user.email
+    if not user_email:
+        raise Exception("User email not found")
+
+    mail["From"] = os.getenv("EMAIL_HOST_USER")
+    mail["To"] = user_email
+    mail["Subject"] = "ELUCID - Your post was made to LinkedIn, post body below"
+    mail.set_content(post)
+
+    with smtplib.SMTP(HOST, int(PORT), timeout=10) as s:
+        s.starttls()
+        s.login(USERNAME, PASSWORD)
+        s.send_message(mail)

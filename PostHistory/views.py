@@ -16,6 +16,7 @@ from .services import (
     _get_active_linkedin_version_candidates,
     generate_post,
     upload_images_to_linkedin,
+    send_email
 )
 
 
@@ -229,6 +230,8 @@ class PostCreateView(CreateAPIView):
 
         post_history_instance = PostHistory.objects.create(**create_kwargs)
         serializer = self.get_serializer(post_history_instance)
+
+        transaction.on_commit(lambda: send_email(user, generated_post_content))
 
         return Response({
             "success": True,

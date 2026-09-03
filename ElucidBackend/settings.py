@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+import dj_database_url
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -83,12 +85,46 @@ WSGI_APPLICATION = 'ElucidBackend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(
+        default=os.getenv('DATABASE_URL'),
+        conn_max_age=600,  # Keeps connection open for 10 minutes to reduce overhead
+        conn_health_checks=True,  # Verifies connection status before reusing
+    )
 }
+# MAILERS = {
+#     "default": {
+#         "BACKEND": "django.core.mail.backends.smtp.EmailBackend",
+#         "HOST": os.getenv("SENDBYTE_HOST", "smtp.gmail.com"),
+#         "PORT": os.getenv("SENDBYTE_PORT", 587),
+#         "USERNAME": os.getenv("SENDBYTE_USERNAME", "[EMAIL_ADDRESS]"),
+#         "PASSWORD": os.getenv("SENDBYTE_PASSWORD", ""),
+#         "USE_TLS": True,
+#         "USE_SSL": False,
+#         "TIMEOUT": 10,
+#     },
+# }
+
+MAILERS = {
+    "default": {
+        "BACKEND": "django.core.mail.backends.smtp.EmailBackend",
+        "HOST": os.getenv("EMAIL_HOST", "smtp.gmail.com"),
+        "PORT": os.getenv("EMAIL_PORT", 587),
+        "USERNAME": os.getenv("EMAIL_HOST_USER", "[EMAIL_ADDRESS]"),
+        "PASSWORD": os.getenv("EMAIL_PASSWORD", ""),
+        "USE_TLS": True,
+        "USE_SSL": False,
+        "TIMEOUT": 10,
+    },
+}
+
 
 
 # Password validation
